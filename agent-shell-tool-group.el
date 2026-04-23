@@ -183,7 +183,14 @@ COLLAPSED controls the indicator character."
   (let ((header (agent-shell-tool-group--make-header-text ov collapsed)))
     (overlay-put ov 'agent-shell-tool-group-collapsed collapsed)
     (overlay-put ov 'before-string header)
-    (overlay-put ov 'invisible collapsed)))
+    (overlay-put ov 'invisible collapsed)
+    ;; Indent children when expanded to show hierarchy
+    (unless collapsed
+      (overlay-put ov 'line-prefix "  ")
+      (overlay-put ov 'wrap-prefix "  "))
+    (when collapsed
+      (overlay-put ov 'line-prefix nil)
+      (overlay-put ov 'wrap-prefix nil))))
 
 (defun agent-shell-tool-group--toggle (ov)
   "Toggle collapsed state of group overlay OV."
