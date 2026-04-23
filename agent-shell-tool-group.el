@@ -34,7 +34,7 @@
 ;;
 ;; They are grouped under:
 ;;
-;;   ▶ Tool Calls (2 x find, read)
+;;   ▶ [done] [3] 2 x find, read
 ;;
 ;; Expanding the group reveals the individual tool calls.
 ;;
