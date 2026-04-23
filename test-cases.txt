@@ -1,0 +1,11 @@
+- consecutive tool calls are grouped under a super group
+- a super group is visible similar to a normal group
+- a super group can be reached to with n or p similar to normal group
+- pressing ret on the super group arrow or clicking with mouse should toggle it
+- on opening the super group the sub groups should be slightly indented
+- the super group shouldn't change indentation on toggling it.
+- the sub-groups can be toggled individually as before (open and close) without altering the view or behaviour of the super group
+- When the super group is expanded it should still be reachable via n and p key
+- I should be able to move my point inside the super group text to reach the arrow via keyboard even without n and p key (in both states open and closed)
+- Jumping from sub group to parent group (with p) shouldn't close the parent group. It should only toggle via RET or mouse click
+- p should strictly jump to the previous group (subgroup, supergroup or no hierarchy group)

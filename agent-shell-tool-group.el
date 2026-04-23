@@ -135,10 +135,13 @@ Returns a string like \"read\", \"find\", \"edit\", etc."
                           (point)))
              (summary (agent-shell-tool-group--make-summary kinds))
              (count (length qualified-ids))
-             (ov (make-overlay group-start group-end nil t nil)))
+             ;; front-advance=nil so overlay start stays anchored
+             ;; at the newlines even when child indicators are toggled.
+             (ov (make-overlay group-start group-end nil nil nil)))
         (overlay-put ov 'agent-shell-tool-group t)
         (overlay-put ov 'agent-shell-tool-group-summary summary)
         (overlay-put ov 'agent-shell-tool-group-count count)
+        (overlay-put ov 'agent-shell-tool-group-keymap (agent-shell-tool-group--make-keymap ov))
         (overlay-put ov 'evaporate t)
         (agent-shell-tool-group--set-collapsed ov t)
         (push ov agent-shell-tool-group--overlays)
@@ -178,19 +181,65 @@ COLLAPSED controls the indicator character."
     (propertize (concat indicator status-badge " " count-badge " " title "\n")
                 'keymap keymap)))
 
+(defun agent-shell-tool-group--header-id (ov)
+  "Return the qualified-id used for the inserted header of OV."
+  (format "tool-group-header-%s" (overlay-start ov)))
+
+(defun agent-shell-tool-group--insert-header (ov collapsed)
+  "Insert real buffer text for the group header before OV's content.
+COLLAPSED controls the indicator character."
+  (let* ((inhibit-read-only t)
+         (header (agent-shell-tool-group--make-header-text ov collapsed))
+         (header-text (string-trim-right header "\n"))
+         (pos (overlay-start ov))
+         (header-id (agent-shell-tool-group--header-id ov)))
+    (save-excursion
+      (goto-char pos)
+      (let ((start (point)))
+        (insert (propertize header-text
+                            'agent-shell-ui-state (list (cons :qualified-id header-id)
+                                                        (cons :collapsed nil)
+                                                        (cons :navigatable t))
+                            'agent-shell-ui-section 'label-left
+                            'read-only t
+                            'front-sticky '(read-only)))
+        (insert (propertize "\n\n" 'read-only t 'front-sticky '(read-only)))
+        ;; Move overlay start past the inserted header
+        (move-overlay ov (point) (overlay-end ov))
+        ;; Store header region for later deletion
+        (overlay-put ov 'agent-shell-tool-group-header-range
+                     (cons start (point)))))))
+
+(defun agent-shell-tool-group--remove-header (ov)
+  "Remove the inserted header text for OV."
+  (when-let ((range (overlay-get ov 'agent-shell-tool-group-header-range)))
+    (let ((inhibit-read-only t)
+          (start (car range))
+          (end (cdr range)))
+      (when (and (<= start (point-max)) (<= end (point-max)))
+        ;; Move overlay start back to include the header region
+        (move-overlay ov start (overlay-end ov))
+        (delete-region start end)
+        (overlay-put ov 'agent-shell-tool-group-header-range nil)))))
+
 (defun agent-shell-tool-group--set-collapsed (ov collapsed)
   "Set group overlay OV to COLLAPSED state."
-  (let ((header (agent-shell-tool-group--make-header-text ov collapsed)))
-    (overlay-put ov 'agent-shell-tool-group-collapsed collapsed)
-    (overlay-put ov 'before-string header)
-    (overlay-put ov 'invisible collapsed)
-    ;; Indent children when expanded to show hierarchy
-    (unless collapsed
-      (overlay-put ov 'line-prefix "  ")
-      (overlay-put ov 'wrap-prefix "  "))
-    (when collapsed
-      (overlay-put ov 'line-prefix nil)
-      (overlay-put ov 'wrap-prefix nil))))
+  (overlay-put ov 'agent-shell-tool-group-collapsed collapsed)
+  ;; Remove old header, insert fresh one with correct indicator
+  (agent-shell-tool-group--remove-header ov)
+  (agent-shell-tool-group--insert-header ov collapsed)
+  (if collapsed
+      (progn
+        ;; Hide children via invisible overlay
+        (overlay-put ov 'invisible t)
+        (overlay-put ov 'display nil)
+        (overlay-put ov 'line-prefix nil)
+        (overlay-put ov 'wrap-prefix nil))
+    ;; Show children, indent them
+    (overlay-put ov 'invisible nil)
+    (overlay-put ov 'display nil)
+    (overlay-put ov 'line-prefix "  ")
+    (overlay-put ov 'wrap-prefix "  ")))
 
 (defun agent-shell-tool-group--toggle (ov)
   "Toggle collapsed state of group overlay OV."
@@ -253,6 +302,55 @@ COLLAPSED controls the indicator character."
                 (push qid agent-shell-tool-group--grouped-ids)))))))))
 
 
+;;; Navigation integration
+
+(defun agent-shell-tool-group--pos-in-collapsed-group-p (pos)
+  "Return non-nil if POS is inside a collapsed group overlay."
+  (seq-find (lambda (ov)
+              (and (overlay-get ov 'agent-shell-tool-group)
+                   (overlay-get ov 'agent-shell-tool-group-collapsed)
+                   (>= pos (overlay-start ov))
+                   (<= pos (overlay-end ov))))
+            (overlays-at pos)))
+
+(defun agent-shell-tool-group--group-at (pos)
+  "Return group overlay whose header or children contain POS, or nil."
+  (seq-find (lambda (ov)
+              (and (overlay-get ov 'agent-shell-tool-group)
+                   (or (and (>= pos (overlay-start ov))
+                            (<= pos (overlay-end ov)))
+                       (when-let ((range (overlay-get ov 'agent-shell-tool-group-header-range)))
+                         (and (>= pos (car range))
+                              (< pos (cdr range)))))))
+            agent-shell-tool-group--overlays))
+
+(defun agent-shell-tool-group--first-child-pos (ov)
+  "Return the position of the first navigatable child in group OV."
+  (save-mark-and-excursion
+    (goto-char (overlay-start ov))
+    (when-let ((match (text-property-search-forward
+                       'agent-shell-ui-state nil
+                       (lambda (_ v) (and v (map-elt v :navigatable)))
+                       t)))
+      (prop-match-beginning match))))
+
+(defun agent-shell-tool-group--forward-block-advice (orig-fn &rest args)
+  "Skip hidden children inside collapsed groups when navigating forward.
+ORIG-FN is the original function, ARGS are its arguments."
+  (let ((pos (apply orig-fn args)))
+    ;; Keep skipping if we landed inside a collapsed group's hidden children
+    (while (and pos (agent-shell-tool-group--pos-in-collapsed-group-p pos))
+      (setq pos (apply orig-fn args)))
+    pos))
+
+(defun agent-shell-tool-group--backward-block-advice (orig-fn &rest args)
+  "Skip hidden children inside collapsed groups when navigating backward.
+ORIG-FN is the original function, ARGS are its arguments."
+  (let ((pos (apply orig-fn args)))
+    (while (and pos (agent-shell-tool-group--pos-in-collapsed-group-p pos))
+      (setq pos (apply orig-fn args)))
+    pos))
+
 ;;; Interactive commands
 
 (defun agent-shell-tool-group-ungroup-all ()
@@ -260,6 +358,7 @@ COLLAPSED controls the indicator character."
   (interactive)
   (dolist (ov agent-shell-tool-group--overlays)
     (when (overlay-buffer ov)
+      (agent-shell-tool-group--remove-header ov)
       (delete-overlay ov)))
   (setq agent-shell-tool-group--overlays nil))
 
@@ -269,6 +368,7 @@ COLLAPSED controls the indicator character."
   (when-let* ((ov (seq-find (lambda (o)
                               (overlay-get o 'agent-shell-tool-group))
                             (overlays-at (point)))))
+    (agent-shell-tool-group--remove-header ov)
     (setq agent-shell-tool-group--overlays
           (delete ov agent-shell-tool-group--overlays))
     (delete-overlay ov)))
@@ -302,11 +402,19 @@ COLLAPSED controls the indicator character."
   (if agent-shell-tool-group-mode
       (progn
         (add-hook 'agent-shell-mode-hook #'agent-shell-tool-group--setup-buffer)
+        (advice-add 'agent-shell-ui-forward-block :around
+                    #'agent-shell-tool-group--forward-block-advice)
+        (advice-add 'agent-shell-ui-backward-block :around
+                    #'agent-shell-tool-group--backward-block-advice)
         (dolist (buf (buffer-list))
           (with-current-buffer buf
             (when (derived-mode-p 'agent-shell-mode)
               (agent-shell-tool-group--setup-buffer)))))
     (remove-hook 'agent-shell-mode-hook #'agent-shell-tool-group--setup-buffer)
+    (advice-remove 'agent-shell-ui-forward-block
+                   #'agent-shell-tool-group--forward-block-advice)
+    (advice-remove 'agent-shell-ui-backward-block
+                   #'agent-shell-tool-group--backward-block-advice)
     (dolist (buf (buffer-list))
       (with-current-buffer buf
         (when (derived-mode-p 'agent-shell-mode)
