@@ -157,40 +157,33 @@ Returns a string like \"read\", \"find\", \"edit\", etc."
     (define-key km (kbd "TAB") toggle)
     km))
 
-(defun agent-shell-tool-group--make-header (ov collapsed)
-  "Build propertized header string for group overlay OV.
+(defun agent-shell-tool-group--make-header-text (ov collapsed)
+  "Build propertized header string for overlay OV.
 COLLAPSED controls the indicator character."
   (let* ((summary (overlay-get ov 'agent-shell-tool-group-summary))
          (count (overlay-get ov 'agent-shell-tool-group-count))
          (indicator (if collapsed "▶ " "▼ "))
          (keymap (agent-shell-tool-group--make-keymap ov))
-         ;; Style the status badge like agent-shell's "done" label
          (label-format (if (display-graphic-p) " %s " "[%s]"))
          (status-badge (agent-shell--add-text-properties
                         (propertize (format label-format "done")
                                     'font-lock-face 'default)
                         'font-lock-face (list 'success '(:inverse-video t))))
-         ;; Style the count badge like agent-shell's kind box
          (box-color (face-foreground 'success nil t))
          (count-badge (agent-shell--add-text-properties
                        (propertize (format label-format (format "%d" count))
                                    'font-lock-face 'default)
                        'font-lock-face `((:box (:color ,box-color)))))
-         ;; Title in the same face as tool call titles
          (title (propertize summary 'font-lock-face 'font-lock-doc-markup-face)))
-    (propertize (concat indicator status-badge " " count-badge " " title)
+    (propertize (concat indicator status-badge " " count-badge " " title "\n")
                 'keymap keymap)))
 
 (defun agent-shell-tool-group--set-collapsed (ov collapsed)
-  "Set overlay OV to COLLAPSED state."
-  (let ((header (agent-shell-tool-group--make-header ov collapsed)))
+  "Set group overlay OV to COLLAPSED state."
+  (let ((header (agent-shell-tool-group--make-header-text ov collapsed)))
     (overlay-put ov 'agent-shell-tool-group-collapsed collapsed)
-    (if collapsed
-        (progn
-          (overlay-put ov 'before-string nil)
-          (overlay-put ov 'display (concat header "\n")))
-      (overlay-put ov 'display nil)
-      (overlay-put ov 'before-string (concat header "\n")))))
+    (overlay-put ov 'before-string header)
+    (overlay-put ov 'invisible collapsed)))
 
 (defun agent-shell-tool-group--toggle (ov)
   "Toggle collapsed state of group overlay OV."
@@ -267,9 +260,7 @@ COLLAPSED controls the indicator character."
   "Remove the tool call group at point."
   (interactive)
   (when-let* ((ov (seq-find (lambda (o)
-                              (and (overlay-get o 'agent-shell-tool-group)
-                                   (<= (overlay-start o) (point))
-                                   (>= (overlay-end o) (point))))
+                              (overlay-get o 'agent-shell-tool-group))
                             (overlays-at (point)))))
     (setq agent-shell-tool-group--overlays
           (delete ov agent-shell-tool-group--overlays))
