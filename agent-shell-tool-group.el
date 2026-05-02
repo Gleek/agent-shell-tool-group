@@ -124,10 +124,13 @@ Returns a string like \"read\", \"find\", \"edit\", etc."
 ;;; Overlay-based grouping
 
 (defun agent-shell-tool-group--create-group (qualified-ids kinds)
-  "Create a collapsible group overlay spanning QUALIFIED-IDS with KINDS."
+  "Create a collapsible group overlay spanning QUALIFIED-IDS with KINDS.
+QUALIFIED-IDS may include non-tool fragments (e.g. thinking) absorbed
+into the group's range; KINDS lists only the tool calls and drives the
+summary and count badge."
   (let ((ranges (delq nil (mapcar #'agent-shell-tool-group--find-fragment
                                   qualified-ids))))
-    (when (>= (length ranges) agent-shell-tool-group-min-count)
+    (when (and ranges (>= (length kinds) agent-shell-tool-group-min-count))
       (let* ((group-start (apply #'min (mapcar (lambda (r) (map-elt r :start)) ranges)))
              (group-end (save-mark-and-excursion
                           (goto-char (apply #'max (mapcar (lambda (r) (map-elt r :end)) ranges)))
@@ -135,8 +138,10 @@ Returns a string like \"read\", \"find\", \"edit\", etc."
                           (point)))
              (summary (agent-shell-tool-group--make-summary kinds))
              (count (length qualified-ids))
-             ;; front-advance=nil so overlay start stays anchored
-             ;; at the newlines even when child indicators are toggled.
+             ;; front-advance=nil so the overlay start stays anchored when
+             ;; agent-shell-ui retoggles a child indicator (delete + insert
+             ;; at the fragment start); with t, the new indicator would end
+             ;; up outside our range.
              (ov (make-overlay group-start group-end nil nil nil)))
         (overlay-put ov 'agent-shell-tool-group t)
         (overlay-put ov 'agent-shell-tool-group-summary summary)
@@ -263,11 +268,25 @@ COLLAPSED controls the indicator character."
                                :existing-only t)))
     (agent-shell-tool-group--scan-and-group-in-buffer viewport-buffer)))
 
+(defun agent-shell-tool-group--fragment-type (qualified-id)
+  "Return the joinable type for QUALIFIED-ID, or nil.
+Returns `:tool' for tool call fragments, `:thinking' for agent
+thought fragments, and nil for anything else (including fragments
+already absorbed into an existing group)."
+  (cond
+   ((member qualified-id agent-shell-tool-group--grouped-ids) nil)
+   ((string-match-p "toolu_" qualified-id) :tool)
+   ((string-suffix-p "-agent_thought_chunk" qualified-id) :thinking)))
+
 (defun agent-shell-tool-group--scan-and-group-in-buffer (buffer)
-  "Scan BUFFER for consecutive tool call fragments and group them."
+  "Scan BUFFER for consecutive tool call fragments and group them.
+Thinking fragments adjacent to tool calls (with no agent text or
+other breaking content between) are absorbed into the group so
+back-to-back tool bursts joined only by thoughts collapse into a
+single unit."
   (with-current-buffer buffer
     (let ((fragments nil))
-      ;; Collect all fragments in buffer order
+      ;; Collect all fragments in buffer order, tagged with their joinable type.
       (save-excursion
         (goto-char (point-min))
         (let ((match nil))
@@ -277,28 +296,36 @@ COLLAPSED controls the indicator character."
             (let* ((pos (prop-match-beginning match))
                    (state (get-text-property pos 'agent-shell-ui-state))
                    (qid (map-elt state :qualified-id))
-                   (is-tool-call (and (string-match-p "toolu_" qid)
-                                      (not (member qid agent-shell-tool-group--grouped-ids)))))
-              (push (cons qid is-tool-call) fragments)))))
-      ;; Find consecutive runs of tool call fragments
+                   (type (agent-shell-tool-group--fragment-type qid)))
+              (push (cons qid type) fragments)))))
+      ;; Build runs: tool and thinking fragments join; anything else breaks.
       (let ((ordered (nreverse fragments))
             (runs nil)
             (current-run nil))
         (dolist (entry ordered)
-          (if (cdr entry)
-              (push (car entry) current-run)
-            (when (>= (length current-run) agent-shell-tool-group-min-count)
-              (push (nreverse current-run) runs))
-            (setq current-run nil)))
-        (when (>= (length current-run) agent-shell-tool-group-min-count)
+          (if (memq (cdr entry) '(:tool :thinking))
+              (push entry current-run)
+            (when current-run
+              (push (nreverse current-run) runs)
+              (setq current-run nil))))
+        (when current-run
           (push (nreverse current-run) runs))
-        ;; Create groups for each run
+        ;; Commit each run if it has enough tool calls. Adjacent thinking
+        ;; fragments — leading, trailing, or between — are kept in the group
+        ;; and contribute a "think" kind to the summary and count.
         (dolist (run (nreverse runs))
-          (let ((kinds (mapcar (lambda (qid)
-                                 (or (agent-shell-tool-group--extract-kind qid) "tool"))
-                               run)))
-            (when (agent-shell-tool-group--create-group run kinds)
-              (dolist (qid run)
+          (let* ((tool-count (seq-count (lambda (e) (eq (cdr e) :tool)) run))
+                 (qids (mapcar #'car run))
+                 (kinds (mapcar (lambda (entry)
+                                  (pcase (cdr entry)
+                                    (:tool (or (agent-shell-tool-group--extract-kind
+                                                (car entry))
+                                               "tool"))
+                                    (:thinking "think")))
+                                run)))
+            (when (and (>= tool-count agent-shell-tool-group-min-count)
+                       (agent-shell-tool-group--create-group qids kinds))
+              (dolist (qid qids)
                 (push qid agent-shell-tool-group--grouped-ids)))))))))
 
 

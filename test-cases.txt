@@ -9,3 +9,8 @@
 - I should be able to move my point inside the super group text to reach the arrow via keyboard even without n and p key (in both states open and closed)
 - Jumping from sub group to parent group (with p) shouldn't close the parent group. It should only toggle via RET or mouse click
 - p should strictly jump to the previous group (subgroup, supergroup or no hierarchy group)
+- thinking blocks adjacent to or between tool calls are absorbed into the same super group (no orphan thinking lines between tool bursts)
+- thinking blocks contribute to the count badge and the summary (e.g. "run, 6 x find, 4 x think" with count 11)
+- a message_chunk between tool calls breaks the super group (the user-visible text stays outside any group)
+- expanding the super group leaves a blank line between the header and the first child, matching the spacing between sibling fragments
+- toggling an inner fragment (its own ▶/▼) does not shift the super group's header or leave orphan indicator characters outside the collapsed display
