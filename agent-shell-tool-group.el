@@ -51,6 +51,8 @@
 (require 'seq)
 (require 'text-property-search)
 
+(defvar agent-shell--state)
+
 (defcustom agent-shell-tool-group-min-count 2
   "Minimum number of consecutive completed tool calls to form a group."
   :type 'integer
@@ -266,24 +268,47 @@ COLLAPSED controls the indicator character."
   (when-let ((viewport-buffer (agent-shell-viewport--buffer
                                :shell-buffer (current-buffer)
                                :existing-only t)))
-    (agent-shell-tool-group--scan-and-group-in-buffer viewport-buffer)))
+    (agent-shell-tool-group--scan-and-group-in-buffer viewport-buffer
+                                                     (current-buffer))))
 
-(defun agent-shell-tool-group--fragment-type (qualified-id)
+(defun agent-shell-tool-group--tool-call-id (qualified-id shell-buffer)
+  "Return provider tool-call id for QUALIFIED-ID in SHELL-BUFFER, or nil."
+  (when (and (buffer-live-p shell-buffer)
+             (boundp 'agent-shell--state))
+    (let ((tool-calls (map-elt (buffer-local-value 'agent-shell--state shell-buffer)
+                               :tool-calls)))
+      (seq-some (lambda (entry)
+                  (let ((tool-call-id (car entry)))
+                    (when (and (stringp tool-call-id)
+                               (string-suffix-p (concat "-" tool-call-id)
+                                                qualified-id))
+                      tool-call-id)))
+                tool-calls))))
+
+(defun agent-shell-tool-group--fragment-type (qualified-id shell-buffer)
   "Return the joinable type for QUALIFIED-ID, or nil.
 Returns `:tool' for tool call fragments, `:thinking' for agent
 thought fragments, and nil for anything else (including fragments
-already absorbed into an existing group)."
+already absorbed into an existing group).
+
+SHELL-BUFFER is used to inspect `agent-shell--state' for provider-agnostic
+tool-call ids.  Older Claude buffers are still recognized by their `toolu_'
+ids as a compatibility fallback."
   (cond
    ((member qualified-id agent-shell-tool-group--grouped-ids) nil)
+   ((agent-shell-tool-group--tool-call-id qualified-id shell-buffer) :tool)
    ((string-match-p "toolu_" qualified-id) :tool)
    ((string-suffix-p "-agent_thought_chunk" qualified-id) :thinking)))
 
-(defun agent-shell-tool-group--scan-and-group-in-buffer (buffer)
+(defun agent-shell-tool-group--scan-and-group-in-buffer (buffer &optional shell-buffer)
   "Scan BUFFER for consecutive tool call fragments and group them.
 Thinking fragments adjacent to tool calls (with no agent text or
 other breaking content between) are absorbed into the group so
 back-to-back tool bursts joined only by thoughts collapse into a
-single unit."
+single unit.
+
+SHELL-BUFFER is the owning `agent-shell-mode' buffer, used when BUFFER is a
+viewport buffer."
   (with-current-buffer buffer
     (let ((fragments nil))
       ;; Collect all fragments in buffer order, tagged with their joinable type.
@@ -296,7 +321,8 @@ single unit."
             (let* ((pos (prop-match-beginning match))
                    (state (get-text-property pos 'agent-shell-ui-state))
                    (qid (map-elt state :qualified-id))
-                   (type (agent-shell-tool-group--fragment-type qid)))
+                   (type (agent-shell-tool-group--fragment-type
+                          qid (or shell-buffer buffer))))
               (push (cons qid type) fragments)))))
       ;; Build runs: tool and thinking fragments join; anything else breaks.
       (let ((ordered (nreverse fragments))
