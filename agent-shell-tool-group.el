@@ -73,6 +73,9 @@
 (defvar-local agent-shell-tool-group--grouped-ids nil
   "Set of qualified IDs already grouped, to avoid re-grouping.")
 
+(defvar-local agent-shell-tool-group--tool-call-ids nil
+  "Provider tool-call IDs seen during the current shell session.")
+
 ;;; Summary label generation
 
 (defun agent-shell-tool-group--make-summary (kinds)
@@ -259,8 +262,15 @@ COLLAPSED controls the indicator character."
 (defun agent-shell-tool-group--on-event (event)
   "Handle agent-shell EVENT for tool call grouping."
   (let ((event-type (map-elt event :event)))
-    (when (memq event-type '(turn-complete prompt-ready))
-      (agent-shell-tool-group--scan-and-group))))
+    (pcase event-type
+      ('tool-call-update
+       (when-let ((tool-call-id (map-elt (map-elt event :data) :tool-call-id)))
+         (cl-pushnew tool-call-id agent-shell-tool-group--tool-call-ids
+                     :test #'equal)))
+      ('input-submitted
+       (setq agent-shell-tool-group--tool-call-ids nil))
+      ((or 'turn-complete 'prompt-ready)
+       (agent-shell-tool-group--scan-and-group)))))
 
 (defun agent-shell-tool-group--scan-and-group ()
   "Scan the buffer for consecutive completed tool call fragments and group them."
@@ -273,17 +283,25 @@ COLLAPSED controls the indicator character."
 
 (defun agent-shell-tool-group--tool-call-id (qualified-id shell-buffer)
   "Return provider tool-call id for QUALIFIED-ID in SHELL-BUFFER, or nil."
-  (when (and (buffer-live-p shell-buffer)
-             (boundp 'agent-shell--state))
-    (let ((tool-calls (map-elt (buffer-local-value 'agent-shell--state shell-buffer)
-                               :tool-calls)))
-      (seq-some (lambda (entry)
-                  (let ((tool-call-id (car entry)))
+  (when (buffer-live-p shell-buffer)
+    (or (seq-some (lambda (tool-call-id)
                     (when (and (stringp tool-call-id)
                                (string-suffix-p (concat "-" tool-call-id)
                                                 qualified-id))
-                      tool-call-id)))
-                tool-calls))))
+                      tool-call-id))
+                  (buffer-local-value 'agent-shell-tool-group--tool-call-ids
+                                      shell-buffer))
+        (when (boundp 'agent-shell--state)
+          (let ((tool-calls (map-elt (buffer-local-value 'agent-shell--state
+                                                         shell-buffer)
+                                     :tool-calls)))
+            (seq-some (lambda (entry)
+                        (let ((tool-call-id (car entry)))
+                          (when (and (stringp tool-call-id)
+                                     (string-suffix-p (concat "-" tool-call-id)
+                                                      qualified-id))
+                            tool-call-id)))
+                      tool-calls))))))
 
 (defun agent-shell-tool-group--fragment-type (qualified-id shell-buffer)
   "Return the joinable type for QUALIFIED-ID, or nil.
@@ -443,7 +461,8 @@ ORIG-FN is the original function, ARGS are its arguments."
     (agent-shell-unsubscribe :subscription agent-shell-tool-group--subscription)
     (setq agent-shell-tool-group--subscription nil))
   (agent-shell-tool-group-ungroup-all)
-  (setq agent-shell-tool-group--grouped-ids nil))
+  (setq agent-shell-tool-group--grouped-ids nil)
+  (setq agent-shell-tool-group--tool-call-ids nil))
 
 ;;; Minor mode
 
